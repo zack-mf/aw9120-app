@@ -22,6 +22,12 @@ typedef enum
     LedMaxC_24_5//24.5mA
 } e9120LedMaxCurrent;
 
+typedef enum
+{
+    IIC_CONTROL,
+    SRAM_CONTROL
+} controlsource;
+
 #define I2C_FILE_NAME   "/dev/i2c-9"
 #define I2C_ADDR        0x2d
 static int fd_i2c;
@@ -421,49 +427,6 @@ static void aw9120_set_all_maxcurrent(e9120LedMaxCurrent maxCurrent)
 
 }
 
-static void aw9120_set_brightness(unsigned char pin, unsigned char brightness)
-{
-    unsigned int data = 0;
-    if(pin < AW9120_LER1_CTRL_PINS)
-    {
-        //enable driver output
-        aw9120_i2c_read(REG_LER1, &data);
-//        printf("AW9120_LER1_CTRL_PINS data: 0x%x\r\n",data);
-        data |= (1 << pin);
-        aw9120_i2c_write(REG_LER1, data);
-        //Set control source:mcu
-        aw9120_i2c_read(REG_CTRS1, &data);
-        data |= (1 << pin);
-        aw9120_i2c_write(REG_CTRS1, data);
-    }
-
-    else if(pin < AW9120_MAX_PINS)
-    {
-        //enable driver output
-        aw9120_i2c_read(REG_LER2, &data);
-//        printf("AW9120_MAX_PINS data: 0x%x\r\n",data);
-        data |= (1 << (pin - AW9120_LER1_CTRL_PINS));
-//        printf("AW9120_MAX_PINS write data : 0x%x\r\n",data);
-        aw9120_i2c_write(REG_LER2, data);
-        //Set control source:mcu
-        aw9120_i2c_read(REG_CTRS2, &data);
-        data |= (1 << (pin - AW9120_LER1_CTRL_PINS));
-        aw9120_i2c_write(REG_CTRS2, data);
-    }
-
-    else
-    {
-        ASSERT(0);
-    }
-
-    aw9120_i2c_write(REG_GCR, 0x0001);//enable LED module
-    //send SETPWMI cmd
-    data = 0xA000; //SETPWMI Ch Im
-    data |= ((unsigned int)pin) << 8;
-    data |= ((unsigned int)brightness);
-    aw9120_i2c_write(REG_CMDR, data);
-}
-
 static void aw9120_turn_off(unsigned char pin)
 {
     unsigned int data = 0;
@@ -572,7 +535,7 @@ static void aw9120_led_blink(unsigned char pin,unsigned int *blink_code, unsigne
             aw9120_i2c_write(REG_LER1, data);
             //Set control source: SRAM Control
             aw9120_i2c_read(REG_CTRS1, &data);
-            data |= (0 << pin);
+            data &= ~(1 << pin);
             aw9120_i2c_write(REG_CTRS1, data);
         }
 
@@ -584,7 +547,7 @@ static void aw9120_led_blink(unsigned char pin,unsigned int *blink_code, unsigne
             aw9120_i2c_write(REG_LER2, data);
             //Set control source: SRAM Control
             aw9120_i2c_read(REG_CTRS2, &data);
-            data |= (0 << (pin - AW9120_LER1_CTRL_PINS));
+            data &= ~(1 << (pin - AW9120_LER1_CTRL_PINS));
             aw9120_i2c_write(REG_CTRS2, data);
         }
 
@@ -603,11 +566,101 @@ static void aw9120_led_blink(unsigned char pin,unsigned int *blink_code, unsigne
         aw9120_i2c_write(REG_WADDR, 0x0000);    /* WADDR-SRAM Load Addr */
         for (int i = 0; i < code_len; i++)
             aw9120_i2c_write(REG_WDATA, blink_code[i]);
+#if 0     
         /* LED SRAM Run */
         aw9120_i2c_write(REG_SADDR, 0x0000);    /* SADDR-SRAM Run Start Addr:0 */
         aw9120_i2c_write(REG_PMR, 0x0001);  /* PMR-Reload and Excute SRAM */
         aw9120_i2c_write(REG_RMR, 0x0002);  /* RMR-Run */
+#endif    
+}
+
+static void aw9120_enable_ledx(unsigned char pin)
+{
+    unsigned int data = 0;
+
+    /* code */
+    if(pin < AW9120_LER1_CTRL_PINS){
+        //enable driver output
+        aw9120_i2c_read(REG_LER1, &data);
+        data |= (1 << pin);
+        aw9120_i2c_write(REG_LER1, data);
+    }else if(pin < AW9120_MAX_PINS){
+        //enable driver output
+        aw9120_i2c_read(REG_LER2, &data);
+        data |= (1 << (pin - AW9120_LER1_CTRL_PINS));
+        aw9120_i2c_write(REG_LER2, data);
+    }
+
+}
+
+static void aw9120_sram_update(unsigned int *blink_code, unsigned int code_len)
+{
+    /* Load LED SRAM */
+    int ret = 0;
+    aw9120_i2c_write(REG_WADDR, 0x0000);    /* WADDR-SRAM Load Addr */
+    for (int i = 0; i < code_len; i++)
+        ret = aw9120_i2c_write(REG_WDATA, blink_code[i]);
+}
+
+static void aw9120_set_conctrl_source(unsigned char pin, int source){
+    unsigned int data = 0;
     
+    if(pin < AW9120_LER1_CTRL_PINS)
+    {
+        aw9120_i2c_read(REG_CTRS1, &data);
+        if (source){
+            data |= (1 << pin);
+        }else{
+            data &= ~(1 << pin);
+        }
+        aw9120_i2c_write(REG_CTRS1, data);
+    }
+    else if(pin < AW9120_MAX_PINS)
+    {
+        aw9120_i2c_read(REG_CTRS2, &data);
+        if (source){
+            // iic 
+            data |= (1 << (pin - AW9120_LER1_CTRL_PINS));
+        }else{
+            // sram
+            data &= ~(1 << (pin - AW9120_LER1_CTRL_PINS));
+        }
+        aw9120_i2c_write(REG_CTRS2, data);
+    }
+
+    aw9120_i2c_write(REG_GCR, 0x0001);//enable LED module
+
+    if (source){
+        // iic 
+        
+    }else{
+        // sram
+        /* LED SRAM Hold Mode */
+        aw9120_i2c_write(REG_PMR, 0x0000);  /* PMR-Load SRAM with I2C */
+        aw9120_i2c_write(REG_RMR, 0x0000);  /* RMR-Hold Mode */
+    }
+
+}
+
+static void aw9120_sram_run(int addr)
+{
+    /* LED SRAM Run */
+    aw9120_i2c_write(REG_SADDR, addr);
+    aw9120_i2c_write(REG_RMR, 0x0002);
+    aw9120_i2c_write(REG_PMR, 0x0001);
+}
+
+static void aw9120_set_brightness(unsigned char pin, unsigned char brightness)
+{
+    unsigned int data = 0;
+    aw9120_enable_ledx(pin);
+    aw9120_set_conctrl_source(pin, 1);
+    aw9120_i2c_write(REG_GCR, 0x0001);//enable LED module
+    //send SETPWMI cmd
+    data = 0xA000; //SETPWMI Ch Im
+    data |= ((unsigned int)pin) << 8;
+    data |= ((unsigned int)brightness);
+    aw9120_i2c_write(REG_CMDR, data);
 }
 
 #if 0
@@ -735,6 +788,44 @@ void aw9120_all_led_config(e9120LedMaxCurrent maxCurrent){
     aw9120_i2c_write(REG_GCR, 0x0001);//enable LED module
 
 }
+static int led_ui_code[] = {
+    
+    //0x0000
+    0xbfff,//on
+    0x3c3e,//1000ms
+    0xbf00,//off
+    0x3c3e,
+    0xbf80,//dim
+    0x3c1f,//500ms
+    0x0000,
+
+    //0x0007
+    0xbf80,//dim
+    0x3c1f,//500ms
+    0xbfff,//on s
+    0xbfff,//on    
+    0x0009,
+   
+    0x0009,
+
+    //0x000b
+    0xbf80,//dim
+    0x3c1f,//500ms
+    0xbf00,//off
+    0x000d,
+        
+};
+
+static int breathe2_code[] = {
+    0x9f03,
+    0xbf00,
+    //0x3c3e,//1000ms
+    0xe080,
+    0x3c20,
+    0xc080,
+    0x3c38,
+    0x0002,
+};
 
 int main(void){
 
@@ -742,88 +833,59 @@ int main(void){
     mc = LedMaxC_24_5; 
     
     iic_open();
-
     aw9120_ic_reset();
-//    aw9120_set_all_maxcurrent(mc);    
- /*
-    aw9120_set_brightness(13,255);
-    aw9120_set_brightness(1,255);
-    aw9120_set_brightness(9,255);
+    aw9120_i2c_write(REG_GCR, 0x0001);//enable LED module
+    aw9120_set_all_maxcurrent(mc);   
+    aw9120_enable_ledx(1);
+    aw9120_set_conctrl_source(1, 0);
+    aw9120_sram_update(led_ui_code, 15);
 
-    aw9120_led_blink(0, led_code, led_code_len);
-    aw9120_led_blink(3, led_code, led_code_len);
-    aw9120_led_blink(10, led_code, led_code_len);
-
-    sleep(5);
-    aw9120_turn_off(0);
-    aw9120_turn_off(1);
-    aw9120_turn_off(3);
-    
-    aw9120_turn_off(9);
-    aw9120_turn_off(10);
-    aw9120_turn_off(13);
-
-
-    aw9120_set_maxcurrent(14,mc);
-
+//    sleep(1);
     aw9120_set_brightness(14,255);
+    aw9120_sram_run(0x0000);
+
+
+#if 0
+    aw9120_set_all_maxcurrent(mc);    
+    aw9120_sram_update(led_ui_code, 21);
+    /*
+    aw9120_set_brightness(14, 255);
+    sleep(5);
+    aw9120_set_brightness(14, 0);
+    */
+    aw9120_sram_run(0, 0x0000); 
+    sleep(5);
+    //aw9120_set_brightness(14, 0);    
+/*
+    aw9120_sram_run(9, 0, 0x0007);
+    sleep(5);
+    aw9120_set_brightness(9, 0);
+
+    aw9120_sram_run(14, 0, 0x000b);
+    sleep(5);
+    aw9120_set_brightness(14, 0);
+
+    aw9120_set_brightness(2, 255);
+    sleep(5);
+    aw9120_set_brightness(2, 0);
 */
 
-    aw9120_all_led_config(mc);
-    int i = 0;
-    int j = 20;
-    for (;;)
-    {       
-        for (int i = 0; i < 13; i++)
-        {
-            /* code */
-            printf("[+++] i = %d\r\n", i);
-            test(14, 255);
-            
+//    aw9120_led_blink(0, test_code, 7);
+//    aw9120_led_blink(14, test_code, 7);
+//    aw9120_led_blink(10, test_code, 7);    
 
-            test(1, i*j);
-            test(1, i*j);
-            test(2, i*j);
-            test(3, i*j);
+//    aw9120_set_brightness(14,255);
+//    aw9120_set_brightness(10,255);
+//    aw9120_set_brightness(13,255);
+//    aw9120_set_brightness(1,255);
+//    aw9120_set_brightness(9,255);
 
-            test(0, i*j);
-            test(12, i*j);
-            test(13, i*j);
+//    aw9120_led_blink(0, led_code, led_code_len);
+    //aw9120_led_blink(3, led_code, led_code_len);
+    //aw9120_led_blink(10, led_code, led_code_len);
 
-            test(9, 100);
-            test(10, 100);
-            test(11, 100);
+#endif
 
-            // usleep(1000*10);       
-        }
-        for (int i = 12; i > 0; i--)
-        {
-            printf("[---] i = %d\r\n", i);
-            
-            test(14, 255);
-
-            test(1, i*j);
-            test(1, i*j);
-            test(2, i*j);
-            test(3, i*j);
-
-            test(0, i*j);
-            test(12, i*j);
-            test(13, i*j);
-
-            test(9, 100);
-            test(10, 100);
-            test(11, 100);
-
-            // usleep(1000*10);
-            /* code */
-        }
-        
-        /* code */
-    }
-    
-    //sleep(5);
-    //aw9120_turn_off(14);
     iic_close();
     return 0;
 }
